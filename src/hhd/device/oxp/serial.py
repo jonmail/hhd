@@ -46,9 +46,6 @@ def gen_rgb_mode(mode: str):
             mc = 0x01
         case "sun":
             mc = 0x08
-        case "classic":
-            mc = 0x00
-            # Missed the code for this one
     return gen_cmd(0xFD, [0x00, mc])
 
 
@@ -81,7 +78,7 @@ def gen_rgb_solid(r, g, b, side: Literal[0x00, 0x03, 0x04] = 0x00):
 
 KBD_NAME = "keyboard"
 KBD_NAME_NON_TURBO = "share"
-KBD_HOLD = 0.2
+KBD_HOLD = 0.12
 OXP_BUTTONS = {
     0x24: KBD_NAME,
     0x22: "extra_l1",
@@ -90,6 +87,7 @@ OXP_BUTTONS = {
 
 
 INITIALIZE = [
+    # gen_intercept(True),
     gen_cmd(
         0xF5,
         "0000000001010101000000020102000000030103000000040104000000050105000000060106000000070107000000080108000000090109000000",
@@ -100,7 +98,7 @@ INITIALIZE = [
         "00000000010a010a0000000b010b0000000c010c0000000d010d0000000e010e0000000f010f000000100110000000220200000000230200000000",
         idx=0x02,
     ),
-    gen_intercept(False),
+    # gen_intercept(False), # does not seem to be needed
 ]
 
 INIT_DELAY = 0.2
@@ -108,19 +106,19 @@ WRITE_DELAY = 0.05
 SCAN_DELAY = 1
 
 _serial = None
-
+_buttons_only = False
 
 def init_serial():
     import serial
 
-    global _serial
+    global _serial, _buttons_only
 
     # Perform a dry run to check the device still exists and if it does
     # return the serial object.
     if _serial:
         try:
             _serial.read(0)
-            return _serial
+            return _serial, _buttons_only
         except Exception:
             _serial = None
 
@@ -128,31 +126,56 @@ def init_serial():
     PID = "7523"
 
     dev = None
-    while not dev:
-        for d in os.listdir("/dev"):
-            if not d.startswith("ttyUSB"):
-                continue
+    buttons_only = False
+    for d in os.listdir("/dev"):
+        if not d.startswith("ttyUSB"):
+            continue
 
-            path = os.path.join("/dev", d)
+        path = os.path.join("/dev", d)
 
-            out = subprocess.run(
-                ["udevadm", "info", "--name", path],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+        out = subprocess.run(
+            ["udevadm", "info", "--name", path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
-            if f"ID_VENDOR_ID={VID}" not in out.stdout:
-                continue
+        if f"ID_VENDOR_ID={VID}" not in out.stdout:
+            continue
 
-            if f"ID_MODEL_ID={PID}" not in out.stdout:
-                continue
+        if f"ID_MODEL_ID={PID}" not in out.stdout:
+            continue
 
-            dev = path
+        dev = path
+        break
+
+    for d in os.listdir("/dev"):
+        if not d.startswith("ttyS"):
+            continue
+
+        path = os.path.join("/dev", d)
+
+        out = subprocess.run(
+            ["udevadm", "info", "--name", path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        # OneXFly device is pnp
+        if "devices/pnp" not in out.stdout:
+            continue
+
+        # TODO: We need to get a baseline to quirk this type properly
+        logger.info(f"Serial port information:\n{out.stdout}")
+
+        dev = path
+        _buttons_only = True
+        break
 
     if not dev:
         logger.warning("OXP CH340 serial device not found.")
-        return None
+        return None, _buttons_only
 
     logger.info(f"OXP CH340 serial device found at {dev}")
 
@@ -171,10 +194,9 @@ def init_serial():
     for d in INITIALIZE:
         ser.write(d)
         time.sleep(WRITE_DELAY)
-    ser.read_until(size=15).hex()
 
     _serial = ser
-    return ser
+    return ser, buttons_only
 
 
 def close_serial():
@@ -196,6 +218,7 @@ class SerialDevice(Consumer, Producer):
         self.last_sent = 0
         self.queue_led = None
         self.turbo = turbo
+        self.buttons_only = False
 
         self.prev_brightness = None
         self.prev_stick = None
@@ -204,7 +227,7 @@ class SerialDevice(Consumer, Producer):
         self.prev_center_enabled = None
 
     def open(self):
-        ser = init_serial()
+        ser, self.buttons_only = init_serial()
         if ser is None:
             if self.required:
                 raise RuntimeError("OXP CH340 serial device not found.")
@@ -215,7 +238,7 @@ class SerialDevice(Consumer, Producer):
         return [ser.fd]
 
     def consume(self, events):
-        if not self.ser:
+        if not self.ser or self.buttons_only:
             return
 
         # Capture led events
@@ -259,6 +282,9 @@ class SerialDevice(Consumer, Producer):
             case "oxp":
                 brightness = ev["brightnessd"]
                 stick = ev["oxp"]
+                if stick == "classic":
+                    # Classic mode is a cherry red
+                    stick = 0xb7, 0x30, 0x00
                 r2, g2, b2 = ev["red2"], ev["green2"], ev["blue2"]
                 center = r2, g2, b2
                 center_enabled = r2 > 10 or g2 > 10 or b2 > 10
@@ -342,6 +368,7 @@ class SerialDevice(Consumer, Producer):
 
             if cid != 0x1A:
                 logger.warning(f"OXP CH340 unknown command: {cmd.hex()}")
+                continue
 
             btn = cmd[2]
 
@@ -366,7 +393,8 @@ class SerialDevice(Consumer, Producer):
                     self.queue_kbd = time.perf_counter()
                 self.prev[btn] = pressed
                 continue
-
+            
+            logger.info(f"OXP CH340 button: {btn} pressed: {pressed}")
             if btn in self.prev and self.prev[btn] == pressed:
                 # Debounce
                 continue

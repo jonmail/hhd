@@ -12,6 +12,8 @@ from hhd.controller.physical.imu import CombinedImu, HrtimerTrigger
 from hhd.controller.virtual.uinput import UInputDevice
 from hhd.plugins import Config, Context, Emitter, get_gyro_state, get_outputs
 from .serial import SerialDevice
+from .hid_v1 import OxpHidraw
+from .hid_v2 import OxpHidrawV2
 from .const import BTN_MAPPINGS, DEFAULT_MAPPINGS, BTN_MAPPINGS_NONTURBO
 
 FIND_DELAY = 0.1
@@ -30,7 +32,29 @@ GAMEPAD_PID = 0x028E
 KBD_VID = 0x0001
 KBD_PID = 0x0001
 
+X1_MINI_VID = 0x1A86
+X1_MINI_PID = 0xFE00
+X1_MINI_PAGE = 0xFF00
+X1_MINI_USAGE = 0x0001
+
+XFLY_VID = 0x1A2C
+XFLY_PID = 0xB001
+XFLY_PAGE = 0xFF01
+XFLY_USAGE = 0x0001
+
 BACK_BUTTON_DELAY = 0.1
+
+RGB_MODES_FULL = {
+    "disabled": [],
+    "oxp": ["oxp", "oxp-secondary"],
+    "solid": ["color"],
+    "duality": ["dual"],
+}
+RGB_MODES_STICKS = {
+    "disabled": [],
+    "oxp": ["oxp"],
+    "solid": ["color"],
+}
 
 
 def plugin_run(
@@ -71,9 +95,7 @@ def plugin_run(
             if turbo and switch_to_turbo and curr > switch_to_turbo:
                 logger.info("Switching to turbo only button mode")
                 updated.clear()
-                turbo_loop(
-                    conf.copy(), should_exit, updated, dconf, emit
-                )
+                turbo_loop(conf.copy(), should_exit, updated, dconf, emit)
                 first = False
             continue
 
@@ -103,6 +125,66 @@ def plugin_run(
     UInputDevice.close_volume_cached()
 
 
+def find_vendor(prepare, turbo, protocol: str | None):
+    d_ser = SerialDevice(turbo=turbo, required=True)
+    d_hidraw = OxpHidraw(
+        vid=[X1_MINI_VID],
+        pid=[X1_MINI_PID],
+        usage_page=[X1_MINI_PAGE],
+        usage=[X1_MINI_USAGE],
+        turbo=turbo,
+        required=True,
+    )
+    d_hidraw_v2 = OxpHidrawV2(
+        vid=[XFLY_VID],
+        pid=[XFLY_PID],
+        usage_page=[XFLY_PAGE],
+        usage=[XFLY_USAGE],
+        turbo=turbo,
+        required=True,
+    )
+
+    if not protocol or protocol in ["serial", "mixed"]:
+        try:
+            prepare(d_ser)
+            # OneXFly uses serial only for the buttons and hidraw for RGB
+            # Initialize V2 selectcively on that one
+            try:
+                if d_ser.buttons_only:
+                    if protocol == "serial":
+                        logger.warning(
+                            f"Device has protocol 'serial', but 'mixed' was detected."
+                        )
+                    prepare(d_hidraw_v2)
+                return [d_ser, d_hidraw_v2]
+            except Exception as e:
+                logger.info(
+                    f"Could not find V2 hidraw vendor device, RGB will not work, error:\n{e}"
+                )
+                return [d_ser]
+        except Exception as e:
+            pass
+
+    if not protocol or protocol == "hid_v1":
+        try:
+            prepare(d_hidraw)
+            logger.info("Found OXP V1 hidraw vendor device.")
+            return [d_hidraw]
+        except Exception as e:
+            pass
+
+    if not protocol or protocol == "hid_v2":
+        try:
+            prepare(d_hidraw_v2)
+            logger.info("Found OXP V2 hidraw vendor device.")
+            return [d_hidraw_v2]
+        except Exception as e:
+            pass
+
+    logger.error("No vendor device found, RGB and back buttons will not work.")
+    return []
+
+
 def turbo_loop(
     conf: Config,
     should_exit: TEvent,
@@ -113,20 +195,22 @@ def turbo_loop(
     debug = DEBUG_MODE
 
     # Output
+    if dconf.get("rgb_secondary", False):
+        rgb_modes = RGB_MODES_FULL
+    elif dconf.get("rgb", True):
+        rgb_modes = RGB_MODES_STICKS
+    else:
+        rgb_modes = None
+
     d_producers, d_outs, d_params = get_outputs(
         conf["controller_mode"],
         None,
         conf["imu"].to(bool),
         emit=emit,
-        rgb_modes={
-            "disabled": [],
-            "oxp": ["oxp"],
-            "solid": ["color"],
-            "duality": ["dual"],
-        },
+        rgb_modes=rgb_modes,  # type: ignore
         controller_disabled=True,
     )
-    
+
     d_kbd_1 = GenericGamepadEvdev(
         vid=[KBD_VID],
         pid=[KBD_PID],
@@ -167,8 +251,6 @@ def turbo_loop(
         qam_no_release=qam_no_release,
         keyboard_no_release=not conf.get("swap_face", False),
     )
-
-    d_ser = SerialDevice(turbo=True)
 
     if dconf.get("x1", False) and conf.get("volume_reverse", False):
         logger.info("Reversing volume buttons.")
@@ -212,12 +294,16 @@ def turbo_loop(
 
     try:
         prepare(d_volume_btn)
-        prepare(d_kbd_1)
-        prepare(d_ser)
+        d_vend = find_vendor(prepare, True, dconf.get("protocol", None))
+        d_vend_id = [id(d) for d in d_vend]
+
         for d in d_producers:
             prepare(d)
+        prepare(d_kbd_1)
 
-        logger.info("Turbo only mode started, the turbo button of the device will still work.")
+        logger.info(
+            "Turbo only mode started, the turbo button of the device will still work."
+        )
         while not should_exit.is_set() and not updated.is_set():
             start = time.perf_counter()
 
@@ -239,7 +325,8 @@ def turbo_loop(
                 to_run.add(id(fd_to_dev[f]))
 
             for d in devs:
-                if id(d) in to_run or d == d_ser:
+                d_id = id(d)
+                if d_id in to_run or d_id in d_vend_id:
                     evs.extend(d.produce(r))
 
             evs = multiplexer.process(evs)
@@ -249,7 +336,8 @@ def turbo_loop(
 
                 d_volume_btn.consume(evs)
 
-            d_ser.consume(evs)
+            for d in d_vend:
+                d.consume(evs)
             for d in d_outs:
                 d.consume(evs)
 
@@ -286,12 +374,9 @@ def controller_loop(
         None,
         conf["imu"].to(bool),
         emit=emit,
-        rgb_modes={
-            "disabled": [],
-            "oxp": ["oxp"],
-            "solid": ["color"],
-            "duality": ["dual"],
-        },
+        rgb_modes=(
+            RGB_MODES_FULL if dconf.get("rgb_secondary", False) else RGB_MODES_STICKS  # type: ignore
+        ),
     )
     motion = d_params.get("uses_motion", True)
 
@@ -318,7 +403,7 @@ def controller_loop(
         # that button that have the nonturbo mapping as default
         mappings = BTN_MAPPINGS
     else:
-        mappings = dconf.get("btn_mapping", BTN_MAPPINGS_NONTURBO)
+        mappings = BTN_MAPPINGS_NONTURBO
 
     d_kbd_1 = GenericGamepadEvdev(
         vid=[KBD_VID],
@@ -362,8 +447,6 @@ def controller_loop(
         qam_no_release=qam_no_release,
         keyboard_no_release=not conf.get("swap_face", False),
     )
-
-    d_ser = SerialDevice(turbo=turbo)
 
     if dconf.get("x1", False) and conf.get("volume_reverse", False):
         logger.info("Reversing volume buttons.")
@@ -409,7 +492,8 @@ def controller_loop(
             fd_to_dev[f] = m
 
     try:
-        # d_vend.open()
+        d_vend = find_vendor(prepare, turbo, dconf.get("protocol", None))
+        d_vend_id = [id(d) for d in d_vend]
         prepare(d_xinput)
         if motion:
             start_imu = True
@@ -419,7 +503,7 @@ def controller_loop(
                 prepare(d_imu)
         prepare(d_volume_btn)
         prepare(d_kbd_1)
-        prepare(d_ser)
+
         for d in d_producers:
             prepare(d)
 
@@ -434,7 +518,8 @@ def controller_loop(
                 to_run.add(id(fd_to_dev[f]))
 
             for d in devs:
-                if id(d) in to_run or d == d_ser:
+                d_id = id(d)
+                if d_id in to_run or d_id in d_vend_id:
                     evs.extend(d.produce(r))
 
             evs = multiplexer.process(evs)
@@ -445,7 +530,8 @@ def controller_loop(
                 d_volume_btn.consume(evs)
                 d_xinput.consume(evs)
 
-            d_ser.consume(evs)
+            for d in d_vend:
+                d.consume(evs)
             for d in d_outs:
                 d.consume(evs)
 

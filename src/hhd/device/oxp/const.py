@@ -13,6 +13,7 @@ DEFAULT_MAPPINGS: dict[str, tuple[Axis, str | None, float, float | None]] = {
 }
 
 X1_MAPPING = gen_gyro_state("x", True, "z", False, "y", False)
+X1_MINI_MAPPING = gen_gyro_state("z", True, "x", False, "y", True)
 
 BTN_MAPPINGS: dict[int, Button] = {
     # Volume buttons come from the same keyboard
@@ -40,34 +41,76 @@ BTN_MAPPINGS_NONTURBO: dict[int, Button] = {
 
 ONEX_DEFAULT_CONF = {
     "hrtimer": True,
-    "btn_mapping": BTN_MAPPINGS_NONTURBO,
+}
+
+OXP_F1_CONF = {
+    "name": "ONEXPLAYER ONEXFLY",
+    **ONEX_DEFAULT_CONF,
+    "protocol": "mixed",
+}
+OXP_2_CONF = {
+    "name": "ONEXPLAYER 2",
+    **ONEX_DEFAULT_CONF,
+    "protocol": "mixed",
+    "rgb": False,
+    "buttons": "none",
+    "protocol": "none",  # explicitly disable
+}
+AOKZOE_CONF = {
+    "name": "AOKZOE A1",
+    "hrtimer": True,
+    "protocol": "none",
+    "rgb": False,
 }
 
 CONFS = {
     # Aokzoe
-    "AOKZOE A1 AR07": {"name": "AOKZOE A1", "hrtimer": True},
-    "AOKZOE A1 Pro": {"name": "AOKZOE A1 Pro", "hrtimer": True},
+    "AOKZOE A1 AR07": AOKZOE_CONF,
+    "AOKZOE A1 Pro": AOKZOE_CONF,
     # Onexplayer
     "ONE XPLAYER": {"name": "ONE XPLAYER", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER Mini Pro": {"name": "ONEXPLAYER Mini Pro", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER F1": {"name": "ONEXPLAYER ONEXFLY", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER F1L": {"name": "ONEXPLAYER ONEXFLY (L)", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER F1 EVA-01": {"name": "ONEXPLAYER ONEXFLY", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER X1 mini": {
-        "name": "ONEXPLAYER X1 mini",
-        "x1": True,
+    "ONEXPLAYER Mini Pro": {
+        "name": "ONEXPLAYER Mini Pro",
         **ONEX_DEFAULT_CONF,
-    },
-    "ONEXPLAYER X1 A": {
-        "name": "ONEXPLAYER X1 (AMD)",
-        "x1": True,
-        **ONEX_DEFAULT_CONF,
-        "mapping": X1_MAPPING,
+        "protocol": "hid_v2",
     },
     "ONEXPLAYER mini A07": {"name": "ONEXPLAYER mini", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER 2 ARP23": {"name": "ONEXPLAYER 2", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER 2 PRO ARP23": {"name": "ONEXPLAYER 2 PRO", **ONEX_DEFAULT_CONF},
-    "ONEXPLAYER 2 PRO ARP23 EVA-01": {"name": "ONEXPLAYER 2 PRO", **ONEX_DEFAULT_CONF},
+    # OneXFly
+    "ONEXPLAYER F1": OXP_F1_CONF,
+    "ONEXPLAYER F1 EVA-01": OXP_F1_CONF,
+    "ONEXPLAYER F1L": OXP_F1_CONF,
+    "ONEXPLAYER F1 OLED": OXP_F1_CONF,
+    # OXP 2
+    "ONEXPLAYER 2": OXP_2_CONF,
+    "ONEXPLAYER 2 ARP23": OXP_2_CONF,
+    "ONEXPLAYER 2 GA18": OXP_2_CONF,
+    # Pro is a bit different
+    "ONEXPLAYER 2 PRO ARP23": OXP_2_CONF,
+    "ONEXPLAYER 2 PRO ARP23 EVA-01": OXP_2_CONF,
+    # X1 Line
+    "ONEXPLAYER X1 mini": {
+        **ONEX_DEFAULT_CONF,
+        "name": "ONEXPLAYER X1 mini",
+        "x1": True,
+        "mapping": X1_MINI_MAPPING,
+        "protocol": "hid_v1",
+    },
+    "ONEXPLAYER X1 A": {
+        **ONEX_DEFAULT_CONF,
+        "name": "ONEXPLAYER X1 (AMD)",
+        "x1": True,
+        "rgb_secondary": True,
+        "mapping": X1_MAPPING,
+        "protocol": "serial",
+    },
+    "ONEXPLAYER X1 i": {
+        **ONEX_DEFAULT_CONF,
+        "name": "ONEXPLAYER X1 (Intel)",
+        "x1": True,
+        "rgb_secondary": True,
+        "mapping": X1_MAPPING,
+        "protocol": "serial",
+    },
 }
 
 
@@ -80,8 +123,11 @@ def get_default_config(product_name: str, manufacturer: str):
         "x1": "X1" in product_name,
     }
 
-    if manufacturer == "ONEXPLAYER":
-        out["btn_mapping"] = BTN_MAPPINGS_NONTURBO
-        out["mapping"] = DEFAULT_MAPPINGS
+    if "X1" in product_name and "mini" not in product_name.lower():
+        out["rgb_secondary"] = True
+
+    if "aokzoe" in manufacturer.lower():
+        out["protocol"] = "none"
+        out["rgb"] = False
 
     return out
